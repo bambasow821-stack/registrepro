@@ -4894,7 +4894,11 @@ function renderPreservingScroll(pillsElementId){
 // suffit à tout adapter d'un coup, sans toucher au reste du code.
 function applyTheme(){
   // Avant qu'un compte existe, on suit le thème choisi sur l'écran d'accueil.
-  document.body.classList.toggle("theme-light", currentTheme()==="light");
+  const isLight = currentTheme()==="light";
+  document.body.classList.toggle("theme-light", isLight);
+  // On annonce au système le thème RÉELLEMENT actif. Sans ça, un téléphone en mode
+  // sombre repeint lui-même l'application quand elle est installée (pas dans le navigateur).
+  document.documentElement.style.colorScheme = isLight ? "light" : "dark";
 }
 
 // Réinitialisation totale — logique pure, réutilisable quel que soit l'endroit qui la déclenche.
