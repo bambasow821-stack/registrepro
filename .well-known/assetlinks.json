@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.bambasow.registrepro",
+        "sha256_cert_fingerprints": ["7F:7B:AA:15:DA:49:3E:EA:73:C4:33:21:0E:5F:AF:92:DD:86:E2:CE:82:BF:B1:39:CD:B7:B3:83:22:7D:35:22"]
+      }
+    }]
