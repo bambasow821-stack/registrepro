@@ -1,4 +1,4 @@
-const CACHE_NAME = "registrepro-cache-v102";
+const CACHE_NAME = "registrepro-cache-v103";
 const ASSETS = [
   "./index.html",
   "./manifest.json",
