@@ -2846,6 +2846,29 @@ function computeStats(){
   return {totalAchats,totalVentes,totalDepenses,totalCreditSales,totalPayments,totalCashFromSales,totalCoutVentes,capitalDispo,beneficeBrut,beneficeNet,marge,sm};
 }
 
+/* ── PRIX D'ACHAT MOYEN PAR VARIANTE ──────────────────────────────────────
+   Une seule source pour tout le monde. La moyenne se calcule sur TOUS les achats
+   du registre, jamais sur ceux d'une période : un mois où l'on n'a rien acheté doit
+   quand même pouvoir chiffrer ce qu'il a vendu.
+   Cette fonction existe pour que le bénéfice affiché à l'accueil, dans les Rapports
+   et dans le graphique soit calculé de la MÊME façon. Trois calculs séparés avaient
+   fini par donner trois chiffres différents pour le même mot. */
+function variantAvgCosts(){
+  const d = state.data;
+  const acc = {};
+  for(const p of d.purchases){
+    if(!isCounted(p)) continue;
+    for(const it of p.items){
+      if(!acc[it.variantId]) acc[it.variantId] = {cost:0, qty:0};
+      acc[it.variantId].cost += it.qty*it.unitCost;
+      acc[it.variantId].qty  += it.qty;
+    }
+  }
+  const avg = {};
+  for(const id in acc) avg[id] = acc[id].qty > 0 ? acc[id].cost/acc[id].qty : 0;
+  return avg;
+}
+
 function getLast6MonthsData(){
   const d = state.data;
   const months = [];
@@ -2853,13 +2876,16 @@ function getLast6MonthsData(){
   for(let i=5;i>=0;i--){
     const dt = new Date(now.getFullYear(), now.getMonth()-i, 1);
     const key = String(dt.getMonth()+1).padStart(2,"0")+"/"+dt.getFullYear();
-    months.push({key, label:dt.toLocaleDateString("fr-FR",{month:"short"}), ventes:0, achats:0, depenses:0});
+    months.push({key, label:dt.toLocaleDateString("fr-FR",{month:"short"}), ventes:0, achats:0, depenses:0, coutVentes:0});
   }
   const byKey = {}; months.forEach(m=>byKey[m.key]=m);
+  const avg = variantAvgCosts();
   for(const p of d.purchases){ if(!isCounted(p)) continue; const k=monthOf(p.date); if(byKey[k]) byKey[k].achats += p.items.reduce((s,i)=>s+i.qty*i.unitCost,0)+(p.deliveryFee||0)+(p.customsFee||0); }
-  for(const s of d.sales){ if(!isCounted(s)) continue; const k=monthOf(s.date); if(byKey[k]) byKey[k].ventes += s.qty*s.salePrice; }
+  for(const s of d.sales){ if(!isCounted(s)) continue; const k=monthOf(s.date); if(byKey[k]){ byKey[k].ventes += s.qty*s.salePrice; byKey[k].coutVentes += s.qty*(avg[s.variantId]||0); } }
   for(const e of d.expenses){ if(!isCounted(e)) continue; const k=monthOf(e.date); if(byKey[k]) byKey[k].depenses += e.amount; }
-  months.forEach(m=> m.benefice = m.ventes-m.achats-m.depenses);
+  // Bénéfice = ventes − coût des articles vendus − dépenses. Faire du stock ne creuse
+  // plus le bénéfice : la marchandise achetée garde sa valeur tant qu'elle est en stock.
+  months.forEach(m=> m.benefice = m.ventes-m.coutVentes-m.depenses);
   return months;
 }
 
@@ -3279,6 +3305,56 @@ function storeSession(d){
 
 async function authSignUp(email, password){
   return await supaCall("/auth/v1/signup", {method:"POST", body:{email:email, password:password}});
+}
+// Renvoi d'un code d'inscription qui ne demande QUE l'adresse. Sert lorsque l'écran a
+// été remonté après un redémarrage : le mot de passe n'est alors plus en mémoire, et
+// on ne l'écrit jamais sur l'appareil. Le bouton « Renvoyer le code » reste donc actif
+// dans tous les cas, sans rien retirer à l'écran.
+async function authResendSignup(email){
+  return await supaCall("/auth/v1/resend", {method:"POST", body:{type:"signup", email:email}});
+}
+
+/* ── NOTE « INSCRIPTION EN COURS » ────────────────────────────────────────
+   Quand on quitte l'application pour aller chercher le code dans sa boîte mail,
+   Android peut la décharger de la mémoire ; elle redémarre alors à l'accueil et
+   l'écran de saisie du code est perdu. L'adresse étant déjà inscrite côté serveur,
+   l'utilisateur se retrouvait coincé : « déjà inscrite » d'un côté, « email non
+   confirmé » de l'autre.
+   On dépose donc une note discrète sur l'appareil — l'adresse et l'étape, JAMAIS le
+   mot de passe — pour remonter l'écran à l'identique au retour. */
+const PENDING_OTP_KEY = "registrepro_pending_otp_v1";
+const PENDING_OTP_MAX_AGE = 24 * 60 * 60 * 1000; // au-delà, le code est mort de toute façon
+
+function savePendingOtp(screen, email){
+  try{
+    localStorage.setItem(PENDING_OTP_KEY, JSON.stringify({
+      screen: screen, email: String(email||""), at: Date.now()
+    }));
+  }catch(e){}
+}
+function readPendingOtp(){
+  try{
+    const raw = localStorage.getItem(PENDING_OTP_KEY);
+    if(!raw) return null;
+    const n = JSON.parse(raw);
+    if(!n || !n.email) return null;
+    if(n.screen !== "otp" && n.screen !== "forgotOtp") return null;
+    if(!n.at || (Date.now() - n.at) > PENDING_OTP_MAX_AGE) return null;
+    return n;
+  }catch(e){ return null; }
+}
+function clearPendingOtp(){
+  try{ localStorage.removeItem(PENDING_OTP_KEY); }catch(e){}
+}
+// Appelée une seule fois au démarrage, AVANT le premier affichage.
+function restorePendingOtp(){
+  if(settings && settings.account){ clearPendingOtp(); return false; }
+  const n = readPendingOtp();
+  if(!n) return false;
+  authUI.screen = n.screen;
+  authUI.d.email = n.email;
+  authUI.d.otp = "";
+  return true;
 }
 async function authVerifyOtp(email, token, type){
   const r = await supaCall("/auth/v1/verify", {method:"POST", body:{type:type, email:email, token:token}});
@@ -3756,7 +3832,12 @@ function bindAuthScreen(){
   const $ = (id)=>document.getElementById(id);
 
   const back = $("auBack");
-  if(back) back.onclick = ()=>authGo(back.dataset.target);
+  if(back) back.onclick = ()=>{
+    // Reculer depuis l'écran du code est un abandon volontaire : la note doit partir,
+    // sinon l'application y reviendrait au prochain démarrage.
+    if(S === "otp" || S === "forgotOtp") clearPendingOtp();
+    authGo(back.dataset.target);
+  };
   const goLogin = $("auGoLogin");
   if(goLogin) goLogin.onclick = ()=>{ authGo("login"); };
 
@@ -3814,6 +3895,7 @@ function bindAuthScreen(){
         return authFail(t("au.errExists"));
       }
       authUI.d.otp = "";
+      savePendingOtp("otp", email);
       authGo("otp");
       authUI.info = t("au.emailSent");
       renderAuth();
@@ -3832,6 +3914,8 @@ function bindAuthScreen(){
       const r = await authVerifyOtp(authUI.d.email, code, isReset ? "recovery" : "signup");
       authUI.busy = false;
       if(!r.ok) return authFail(authErrorText(r));
+      // Le code a joué son rôle : la note n'a plus lieu d'être.
+      clearPendingOtp();
       if(isReset){ authGo("forgotNew"); return; }
       // Compte vérifié : il existe pour de bon. Même si l'application se ferme
       // maintenant, on pourra se connecter plus tard avec cet email.
@@ -3845,7 +3929,18 @@ function bindAuthScreen(){
     $("auResend").onclick = async ()=>{
       if(authUI.busy) return;
       authUI.busy = true; renderAuth();
-      const r = isReset ? await authRecover(authUI.d.email) : await authSignUp(authUI.d.email, authUI.d.password);
+      let r;
+      if(isReset){
+        r = await authRecover(authUI.d.email);
+      } else if(authUI.d.password){
+        // Chemin habituel, inchangé : le mot de passe est encore en mémoire.
+        r = await authSignUp(authUI.d.email, authUI.d.password);
+      } else {
+        // Écran remonté après un redémarrage de l'application : le mot de passe a été
+        // perdu avec la mémoire, et on ne l'écrit jamais sur l'appareil. Ce chemin-là
+        // ne demande que l'adresse, si bien que le bouton reste utilisable.
+        r = await authResendSignup(authUI.d.email);
+      }
       authUI.busy = false;
       if(!r.ok) return authFail(authErrorText(r));
       authUI.error = ""; authUI.info = t("au.resent"); renderAuth();
@@ -3983,6 +4078,7 @@ function bindAuthScreen(){
       authUI.busy = false;
       if(!r.ok) return authFail(authErrorText(r));
       authUI.d.otp = "";
+      savePendingOtp("forgotOtp", email);
       authGo("forgotOtp");
       // Message honnête : on ne révèle pas si l'adresse a un compte, et on ne
       // promet pas non plus un code qui ne viendrait jamais.
@@ -4126,6 +4222,7 @@ async function applyAccountToDevice(row){
     }
   };
   saveSettings(settings);
+  clearPendingOtp(); // le compte est en place : plus aucune inscription en attente
 
   // Capital de départ : uniquement à la création du commerce, jamais sur un appareil
   // qui rejoint un compte existant (le capital y viendra de la synchronisation).
@@ -4156,6 +4253,14 @@ async function applyAccountToDevice(row){
   render();
   showToast(t("au.accountReady"));
   refreshRatesInBackground();
+
+  // La boutique est maintenant connue : c'est SEULEMENT ici que la synchronisation
+  // peut réellement travailler. Au démarrage de l'application, la boucle ne partait
+  // que si un compte existait déjà ; en se connectant pendant que l'application
+  // tourne, elle ne partait jamais et les données ne descendaient qu'au bouton
+  // « Synchroniser maintenant ». startSyncLoop() se protège lui-même des doubles
+  // départs, on peut donc l'appeler à chaque entrée sans risque.
+  if(typeof startSyncLoop === "function") startSyncLoop();
 }
 
 // ── Déconnexion : la session part, le registre reste sur l'appareil ──
@@ -4274,7 +4379,7 @@ function openAccountMenu(){
           <div style="flex:0 0 auto;width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--gold),#c97f4f);color:#fff;font-size:19px;font-weight:bold;font-family:Georgia,serif;display:flex;align-items:center;justify-content:center;">${esc(((settings.businessName||"R").trim()[0]||"R").toUpperCase())}</div>
           <div style="min-width:0;">
             <div style="font-size:15px;font-weight:bold;color:var(--gold);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(settings.businessName||"")}</div>
-            <div style="font-size:12px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(acc.email||"")}</div>
+            <div style="font-size:12px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(accountHandle())}</div>
             <div style="font-size:11px;color:var(--sub);margin-top:2px;">${esc(roleTxt)}</div>
           </div>
         </div>
@@ -4406,6 +4511,22 @@ function isOwner(){
 }
 function isSeller(){
   return !!(settings && settings.account && settings.account.role === "seller");
+}
+/* ── CE QU'ON MONTRE POUR IDENTIFIER LE COMPTE ────────────────────────────
+   Le serveur ne sait travailler qu'avec des adresses email. Un vendeur n'en a pas :
+   l'application lui en fabrique donc une à partir de son identifiant
+   (la-099993683@sellers.registrepro.app). C'est un rouage interne — le vendeur ne la
+   tape jamais, elle ne reçoit aucun courrier, et personne ne doit la voir.
+   On affiche donc son identifiant, celui qu'il saisit pour se connecter.
+   Pour le propriétaire, rien ne change : sa vraie adresse est utile et reste affichée. */
+function accountHandle(){
+  const acc = (settings && settings.account) || {};
+  if(acc.role === "seller") return acc.sellerLogin || "";
+  return acc.email || "";
+}
+// Étiquette qui va avec : « Identifiant » pour un vendeur, « Email du compte » sinon.
+function accountHandleLabel(){
+  return isSeller() ? t("sel.loginLabel") : t("au.accountEmail");
 }
 // Identifiant stable de qui agit maintenant : le login BS- du vendeur connecté,
 // ou "" pour le propriétaire. Gravé sur chaque nouvel enregistrement (recordedById).
@@ -4741,7 +4862,7 @@ function openAccountPage(){
           <div style="flex:0 0 auto;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,var(--gold),#c97f4f);color:#fff;font-size:24px;font-weight:bold;font-family:Georgia,serif;display:flex;align-items:center;justify-content:center;">${esc(initial)}</div>
           <div style="min-width:0;">
             <div style="font-size:17px;font-weight:bold;color:var(--gold);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(settings.businessName||"")}</div>
-            <div style="font-size:12px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(acc.email||"")}</div>
+            <div style="font-size:12px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(accountHandle())}</div>
           </div>
         </div>
 
@@ -4778,8 +4899,8 @@ function openAccountPage(){
         ${sectionTitle(t("au.accountTitle"))}
         <div class="card">
           <div class="row-between" style="margin-bottom:10px;">
-            <span class="muted" style="font-size:12px;">${t("au.accountEmail")}</span>
-            <span style="font-size:12px;font-weight:bold;">${esc(acc.email||"—")}</span>
+            <span class="muted" style="font-size:12px;">${accountHandleLabel()}</span>
+            <span style="font-size:12px;font-weight:bold;">${esc(accountHandle()||"—")}</span>
           </div>
           <div class="row-between">
             <span class="muted" style="font-size:12px;">${t("au.accountRole")}</span>
@@ -4867,7 +4988,13 @@ async function doSignOut(){
   isUnlocked = false;
   showToast(t("au.signedOut"));
   authUI.screen = "welcome"; authUI.error = ""; authUI.info = ""; authUI.showEmailTaken = false;
-  authUI.d.email = (settings && settings.account) ? settings.account.email : "";
+  // On repropose l'adresse du propriétaire pour lui éviter de la retaper. Pour un
+  // vendeur, l'adresse enregistrée est celle fabriquée en interne : elle n'a rien à
+  // faire dans un champ visible, on laisse donc le champ vide. Son identifiant, lui,
+  // reste proposé sur l'écran « Je suis vendeur ».
+  authUI.d.email = (settings && settings.account && settings.account.role !== "seller")
+    ? settings.account.email : "";
+  authUI.d.sellerLogin = (settings && settings.account && settings.account.sellerLogin) || "";
   authUI.d.password = ""; authUI.d.password2 = ""; authUI.d.otp = "";
   renderAuth();
 }
@@ -8111,12 +8238,15 @@ function renderReports(stats){
     fromISO = mb.from; toISO = mb.to;
   }
 
-  let achats=0, ventes=0, depenses=0, paiementsRecus=0;
+  let achats=0, ventes=0, depenses=0, paiementsRecus=0, coutVentes=0;
+  const avgCosts = variantAvgCosts();
   for(const p of d.purchases){ if(!isCounted(p)) continue; const iso=frToISO(p.date); if(iso>=fromISO && iso<=toISO) achats += p.items.reduce((s,i)=>s+i.qty*i.unitCost,0)+(p.deliveryFee||0)+(p.customsFee||0); }
-  for(const s of d.sales){ if(!isCounted(s)) continue; const iso=frToISO(s.date); if(iso>=fromISO && iso<=toISO) ventes += s.qty*s.salePrice; }
+  for(const s of d.sales){ if(!isCounted(s)) continue; const iso=frToISO(s.date); if(iso>=fromISO && iso<=toISO){ ventes += s.qty*s.salePrice; coutVentes += s.qty*(avgCosts[s.variantId]||0); } }
   for(const e of d.expenses){ if(!isCounted(e)) continue; const iso=frToISO(e.date); if(iso>=fromISO && iso<=toISO) depenses += e.amount; }
   for(const p of (d.payments||[])){ if(!isCounted(p)) continue; const iso=frToISO(p.date); if(iso>=fromISO && iso<=toISO) paiementsRecus += p.amount||0; }
-  const benefice = ventes-achats-depenses;
+  // Même définition qu'à l'accueil et que dans le Résumé Global, sans exception :
+  // ventes − coût des articles vendus − dépenses.
+  const benefice = ventes-coutVentes-depenses;
 
   const periodLabel = state.reportMode==="periode"
     ? `${t("rep.periodFrom")} ${esc(isoToFRShort(fromISO))} ${t("rep.periodTo")} ${esc(isoToFRShort(toISO))}`
@@ -9430,6 +9560,10 @@ if("serviceWorker" in navigator){
 /* ════════════════════════════════════════════════
    INIT
 ════════════════════════════════════════════════ */
+// Une inscription (ou une réinitialisation) interrompue par le déchargement de
+// l'application se reprend là où elle en était. À faire AVANT le premier affichage,
+// sans quoi l'écran d'accueil s'afficherait puis sauterait.
+restorePendingOtp();
 checkLockOrRender();
 // Après l'affichage : si on a du réseau, on rafraîchit discrètement les taux du jour
 // et on renouvelle la session du compte. Sans réseau, rien ne bloque : l'application
