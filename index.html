@@ -199,6 +199,11 @@ nav button.active .nlab{font-weight:bold;}
 /* ════════════════════════════════════════════════
    STORAGE & STATE
 ════════════════════════════════════════════════ */
+// Numéro de version, visible en bas de « À propos ». Sert à savoir d'un coup d'œil
+// quelle version tourne réellement sur un appareil — sans lui, impossible de dire si
+// une correction livrée est bien arrivée jusqu'au téléphone. À garder identique au
+// numéro de cache du service-worker.js à chaque livraison.
+const APP_VERSION = "v107";
 const STORE_KEY = "registrepro_data_v2";
 const SETTINGS_KEY = "registrepro_settings_v2";
 
@@ -8778,11 +8783,13 @@ function openLegalModal(key){
       <p>Elle fonctionne hors ligne et se synchronise entre vos appareils.</p>
       <p>Développée par Bamba Sow.</p>
       <p style="color:var(--sub);font-size:11px;">Contact : ${mail}</p>
+      <p style="color:var(--sub);font-size:11px;">Version ${APP_VERSION}</p>
     ` : `
       <p><b>RegistrePro</b> is a business management app: sales, purchases, stock, credits and finances, built for shopkeepers.</p>
       <p>It works offline and syncs across your devices.</p>
       <p>Developed by Bamba Sow.</p>
       <p style="color:var(--sub);font-size:11px;">Contact: ${mail}</p>
+      <p style="color:var(--sub);font-size:11px;">Version ${APP_VERSION}</p>
     `;
   }
 
