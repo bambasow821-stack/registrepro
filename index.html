@@ -203,7 +203,7 @@ nav button.active .nlab{font-weight:bold;}
 // quelle version tourne réellement sur un appareil — sans lui, impossible de dire si
 // une correction livrée est bien arrivée jusqu'au téléphone. À garder identique au
 // numéro de cache du service-worker.js à chaque livraison.
-const APP_VERSION = "v110";
+const APP_VERSION = "v111";
 const STORE_KEY = "registrepro_data_v2";
 const SETTINGS_KEY = "registrepro_settings_v2";
 
@@ -2259,14 +2259,27 @@ function toCoffreRow(kind, rec){
 
 // Liste toutes les opérations qui doivent monter (nouvelles ou modifiées depuis
 // la dernière confirmation du coffre).
+/* ── VERROU 2 : CHAQUE OPÉRATION RESTE DANS SA BOUTIQUE ───────────────────
+   Chaque opération porte, gravé dessus, le numéro de la boutique où elle est née.
+   Cette information existait déjà mais n'était jamais relue au moment d'envoyer :
+   l'application envoyait tout ce qui attendait, sans regarder d'où ça venait.
+   Le serveur, lui, ne peut pas s'en apercevoir — il range ce qu'on lui donne dans la
+   boutique de celui qui parle. C'est ainsi que des opérations d'un commerce ont pu
+   atterrir dans un autre.
+   Deuxième barrière, indépendante de la première : une opération gravée au nom d'une
+   autre boutique ne sort pas, quelles que soient les circonstances.
+   Les opérations anciennes, sans gravure, restent autorisées — elles datent d'avant
+   cette marque et appartiennent forcément au registre présent sur l'appareil. */
 function collectPending(){
   const pending = [];
   if(!state || !state.data) return pending;
+  const shopId = (settings && settings.account && settings.account.shopId) || "";
   SYNC_COLLECTIONS.forEach(function(kind){
     const arr = state.data[kind];
     if(!Array.isArray(arr)) return;
     arr.forEach(function(rec){
       if(!rec || typeof rec !== "object" || !rec.id) return;
+      if(rec.shopId && shopId && rec.shopId !== shopId) return; // étrangère : elle reste
       const acked = syncState.acked ? syncState.acked[rec.id] : undefined;
       const current = rec.updatedAt || "";
       if(acked !== current){
@@ -2361,6 +2374,10 @@ async function syncPush(){
   if(syncInFlight){ syncPendingAgain = true; return {ok:false, sent:0, error:"busy"}; }
   if(!auth || !auth.access_token){ return {ok:false, sent:0, error:"no-session"}; }
   if(!settings || !settings.account){ return {ok:false, sent:0, error:"no-account"}; }
+  // VERROU 1 — posé ici et pas seulement dans la boucle : syncPush() est aussi appelée
+  // directement à la déconnexion et pendant un changement de compte. C'est justement
+  // là que la clé et le registre peuvent ne pas aller ensemble.
+  if(!syncIdentityOk()){ return {ok:false, sent:0, error:"identity-mismatch"}; }
 
   syncInFlight = true;
   let totalSent = 0;
@@ -2612,6 +2629,9 @@ function applyIncomingSettings(row){
 async function syncPull(){
   if(!auth || !auth.access_token){ return {ok:false, received:0, changed:0, error:"no-session"}; }
   if(!settings || !settings.account){ return {ok:false, received:0, changed:0, error:"no-account"}; }
+  // VERROU 1 — une descente lancée pendant un changement de compte verserait les
+  // opérations de la nouvelle boutique dans le registre de l'ancienne.
+  if(!syncIdentityOk()){ return {ok:false, received:0, changed:0, error:"identity-mismatch"}; }
 
   try{
     await authRefreshSession();
@@ -2700,8 +2720,31 @@ async function syncFull(){
 // ressenti : quand on regarde son téléphone, c'est à jour.
 let _pullTimer = null;
 let _lastAutoSync = 0;
+let _syncListenersBound = false;
+
+/* ── VERROU 1 : LA CLÉ ET LE REGISTRE DOIVENT ALLER ENSEMBLE ──────────────
+   Pendant une connexion, il existe un court instant où l'appareil détient déjà la clé
+   du NOUVEAU compte alors que le registre est encore celui de l'ANCIEN : la session
+   est enregistrée avant que la fiche du commerce ne soit lue et le registre remplacé.
+   Si une synchronisation passe à cet instant, elle envoie les opérations d'une
+   boutique dans une autre — le serveur, lui, ne peut rien voir : il range simplement
+   ce qu'on lui donne dans la boutique de celui qui parle.
+   On exige donc que la session ouverte soit bien celle du compte inscrit sur cet
+   appareil. Tant que les deux ne correspondent pas : silence complet, dans les deux
+   sens. Le temps que ça dure se compte en secondes, et la synchronisation reprend
+   d'elle-même juste après. */
+function syncIdentityOk(){
+  if(!(settings && settings.account && auth && auth.access_token)) return false;
+  const compte = settings.account.userId || "";
+  const session = auth.user_id || "";
+  if(!compte || !session) return false;
+  if(compte !== session) return false;
+  if(!settings.account.shopId) return false;
+  return true;
+}
+
 function runSyncNow(){
-  if(!(settings && settings.account && auth && auth.access_token)) return;
+  if(!syncIdentityOk()) return;
   const now = Date.now();
   if(now - _lastAutoSync < 3000) return; // jamais deux fois coup sur coup
   _lastAutoSync = now;
@@ -2714,13 +2757,24 @@ function startSyncLoop(){
   if(_pullTimer) return;
   runSyncNow();
   _pullTimer = setInterval(runSyncNow, 30000); // toutes les 30 secondes, discrètement
-  // Retour dans l'application : mise à jour immédiate.
+  // Retour dans l'application : mise à jour immédiate. Ces écouteurs ne se posent
+  // qu'une seule fois pour toute la vie de la page — sans quoi chaque connexion en
+  // ajouterait une couche, et l'application synchroniserait en double, en triple…
+  if(_syncListenersBound) return;
+  _syncListenersBound = true;
   try{
     document.addEventListener("visibilitychange", function(){
       if(!document.hidden) runSyncNow();
     });
     window.addEventListener("focus", runSyncNow);
   }catch(e){}
+}
+// Arrêt net : à la déconnexion, la boucle doit cesser de tourner. Sans cela elle
+// continuait pendant tout le parcours de connexion suivant.
+function stopSyncLoop(){
+  if(_pullTimer){ try{ clearInterval(_pullTimer); }catch(e){} }
+  _pullTimer = null;
+  _lastAutoSync = 0;
 }
 
 // Déclenche une montée en arrière-plan, sans bloquer l'écran. Silencieux.
@@ -4192,18 +4246,22 @@ async function afterSignedIn(){
   const previousShop = settings && settings.account ? settings.account.shopId : null;
   const incomingShop = row ? row.shop_id : null;
   if(hasData && previousShop && incomingShop && previousShop !== incomingShop){
-    // Le registre local va être remplacé. Avant tout, on tente de mettre à l'abri ce
-    // qui n'est pas encore monté au coffre : c'est la seule chose réellement en jeu.
-    // Le reste est déjà en sécurité et redescendra en se reconnectant.
-    if(pendingCount() > 0){
-      try{ await syncPush(); }catch(e){}
-    }
+    /* Le registre local va être remplacé.
+       ⚠️ On NE tente PLUS de monter au passage ce qui n'était pas encore synchronisé.
+       C'était l'intention inverse du résultat : à cet instant la session ouverte est
+       déjà celle du NOUVEAU compte, et le serveur range ce qu'on lui donne dans la
+       boutique de celui qui parle. Les opérations de l'ancienne boutique atterrissaient
+       donc dans la nouvelle. C'est ce qui a mélangé deux commerces.
+       Une opération non synchronisée ne peut être mise à l'abri QUE par le compte à
+       qui elle appartient. On se contente donc de prévenir honnêtement, et l'utilisateur
+       garde la main : il peut annuler, se reconnecter à l'autre compte et synchroniser. */
+    const restant = pendingCount();
     // Si tout est monté, on efface en silence : rien ne peut être perdu, il n'y a
     // donc aucune raison d'inquiéter l'utilisateur à chaque changement de compte.
     // On ne l'arrête QUE s'il reste des opérations qui n'ont jamais atteint le coffre.
-    const restant = pendingCount();
     if(restant > 0 && !confirm(t("au.unsyncedLoss").replace("{n}", String(restant)))){
       await authSignOutServer();
+      if(typeof stopSyncLoop === "function") stopSyncLoop();
       return authFail(t("au.loginCancelled"));
     }
     state.data = {capitalInitial:0, products:[], variants:[], purchases:[], sales:[], expenses:[], payments:[], clients:[], deletedLog:[], orders:[], receiptCounter:0};
@@ -5061,6 +5119,7 @@ function closeAccountPage(){
 async function doSwitchAccount(){
   if(!confirm(t("au.switchConfirm"))) return;
   await authSignOutServer();
+  if(typeof stopSyncLoop === "function") stopSyncLoop();
   if(typeof resetSyncState === "function") resetSyncState();
   isUnlocked = false;
   authUI.screen = "login"; authUI.error = ""; authUI.info = ""; authUI.showEmailTaken = false;
@@ -5078,6 +5137,10 @@ async function doSignOut(){
     try{ await syncPush(); }catch(e){}
   }
   await authSignOutServer();
+  // La boucle doit cesser de tourner ICI. Sans cela elle continuait pendant tout le
+  // parcours de connexion suivant, et pouvait partir alors que l'appareil détenait
+  // déjà la clé du nouveau compte et encore le registre de l'ancien.
+  if(typeof stopSyncLoop === "function") stopSyncLoop();
   if(typeof resetSyncState === "function") resetSyncState();
   isUnlocked = false;
   showToast(t("au.signedOut"));
