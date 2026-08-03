@@ -203,7 +203,7 @@ nav button.active .nlab{font-weight:bold;}
 // quelle version tourne réellement sur un appareil — sans lui, impossible de dire si
 // une correction livrée est bien arrivée jusqu'au téléphone. À garder identique au
 // numéro de cache du service-worker.js à chaque livraison.
-const APP_VERSION = "v107";
+const APP_VERSION = "v110";
 const STORE_KEY = "registrepro_data_v2";
 const SETTINGS_KEY = "registrepro_settings_v2";
 
@@ -745,7 +745,7 @@ const I18N = {
     "au.errNotConfirmed": "Votre email n'est pas encore vérifié. Vérifiez votre boîte email.",
     "au.errTooMany": "Trop de tentatives. Patientez quelques minutes avant de réessayer.",
     "au.errNoProfile": "Compte trouvé, mais sans fiche de commerce. Contactez le support.",
-    "au.otherAccountData": "Cet appareil contient déjà le registre d'un autre compte. Continuer effacera ces données de CET appareil. Voulez-vous continuer ?",
+    "au.unsyncedLoss": "{n} opération(s) enregistrée(s) sur cet appareil n'ont jamais été sauvegardées en ligne. Continuer les perdra définitivement. Voulez-vous continuer ?",
     "au.loginCancelled": "Connexion annulée. Aucune donnée n'a été touchée.",
     "au.accountReady": "✅ Compte prêt. Bienvenue !",
     "au.accountTitle": "👤 Mon compte",
@@ -1478,7 +1478,7 @@ const I18N = {
     "au.errNotConfirmed": "Your email isn't verified yet. Check your inbox.",
     "au.errTooMany": "Too many attempts. Please wait a few minutes.",
     "au.errNoProfile": "Account found, but no business record. Please contact support.",
-    "au.otherAccountData": "This device already holds another account's ledger. Continuing will erase that data from THIS device. Continue?",
+    "au.unsyncedLoss": "{n} operation(s) saved on this device were never backed up online. Continuing will lose them permanently. Continue?",
     "au.loginCancelled": "Sign-in cancelled. No data was touched.",
     "au.accountReady": "✅ Account ready. Welcome!",
     "au.accountTitle": "👤 My account",
@@ -3363,7 +3363,14 @@ function clearPendingOtp(){
 }
 // Appelée une seule fois au démarrage, AVANT le premier affichage.
 function restorePendingOtp(){
-  if(settings && settings.account){ clearPendingOtp(); return false; }
+  // Exactement la même condition que checkLockOrRender() : il faut un compte sur
+  // l'appareil ET une session ouverte pour que le registre s'ouvre. S'il manque l'une
+  // des deux, l'application affiche le parcours du compte — et c'est précisément là
+  // qu'une inscription interrompue doit pouvoir reprendre.
+  // Ne vérifier que la présence du compte était faux : un appareil ayant déjà servi
+  // garde son compte inscrit après une déconnexion, et la note était jetée à tort.
+  const ouvert = !!(settings && settings.account && auth && auth.access_token);
+  if(ouvert){ clearPendingOtp(); return false; }
   const n = readPendingOtp();
   if(!n) return false;
   authUI.screen = n.screen;
@@ -3705,6 +3712,17 @@ function renderAuth(){
     return `<button type="button" id="auBack" style="background:none;border:none;color:var(--sub);font-size:12px;cursor:pointer;padding:10px 0;width:100%;margin-top:4px;" data-target="${target}">⬅ ${esc(t("au.back"))}</button>`;
   }
 
+  /* Bouton pour repartir vers l'écran du code sans en redemander un nouveau.
+     N'apparaît QUE si une inscription attend déjà sa confirmation : un utilisateur
+     qui s'inscrit pour la première fois ne le voit jamais, l'écran ne change pas.
+     Sert à celui qui a reculé pour corriger son mot de passe et veut simplement
+     revenir saisir le code qu'il a déjà reçu. */
+  function resumeLink(){
+    const n = readPendingOtp();
+    if(!n || n.screen !== "otp") return "";
+    return `<button type="button" id="auResume" style="background:none;border:none;color:var(--goldL);font-size:12px;cursor:pointer;padding:10px 0;width:100%;margin-top:4px;">${esc(t("au.next"))}</button>`;
+  }
+
   if(S === "welcome"){
     body = `
       <div class="ob-logo">✦</div>
@@ -3736,6 +3754,7 @@ function renderAuth(){
       <div class="field"><label>${esc(t("au.password2"))}</label>
         ${pwFieldHtml("auPw2", authUI.d.password2, t("au.password2Ph"), "new-password")}</div>
       <button class="btn" style="background:var(--gold);margin-top:6px;" id="auSendSignup" ${authUI.busy?"disabled":""}>${esc(authUI.busy ? t("au.sending") : t("au.sendCode"))}</button>
+      ${resumeLink()}
       ${backLink("welcome")}`;
   }
 
@@ -3848,10 +3867,20 @@ function bindAuthScreen(){
 
   const back = $("auBack");
   if(back) back.onclick = ()=>{
-    // Reculer depuis l'écran du code est un abandon volontaire : la note doit partir,
-    // sinon l'application y reviendrait au prochain démarrage.
-    if(S === "otp" || S === "forgotOtp") clearPendingOtp();
+    // Reculer depuis l'écran du code n'est PAS un abandon : c'est presque toujours pour
+    // corriger un mot de passe et revenir. La note reste donc en place, et le bouton
+    // « Suivant ➜ » de l'écran 1 permet de retrouver l'écran du code sans en redemander.
+    // Elle n'est jetée que si l'on recule jusqu'à l'accueil — là, c'est un vrai abandon.
+    if(back.dataset.target === "welcome") clearPendingOtp();
     authGo(back.dataset.target);
+  };
+  const resume = $("auResume");
+  if(resume) resume.onclick = ()=>{
+    const n = readPendingOtp();
+    if(!n) return renderAuth();
+    authUI.d.email = n.email;
+    authUI.d.otp = "";
+    authGo(n.screen);
   };
   const goLogin = $("auGoLogin");
   if(goLogin) goLogin.onclick = ()=>{ authGo("login"); };
@@ -3897,6 +3926,25 @@ function bindAuthScreen(){
       authUI.busy = true; authUI.error = ""; renderAuth();
       const r = await authSignUp(email, pw);
       authUI.busy = false;
+
+      // Une inscription est déjà en attente pour CETTE adresse : le serveur refuse d'en
+      // ouvrir une seconde, et c'est normal. Plutôt que d'annoncer « déjà inscrite » et
+      // de laisser l'utilisateur sans issue — il ne peut ni avancer, ni s'identifier
+      // tant que le code n'est pas validé — on le conduit à l'écran du code.
+      // Celui qu'il a reçu reste valable, et le bouton « Renvoyer » est là s'il l'a perdu.
+      const enAttente = readPendingOtp();
+      const memeAdresse = enAttente && enAttente.screen === "otp" &&
+                          enAttente.email.toLowerCase() === email.toLowerCase();
+      const dejaPris = (!r.ok && isAlreadyRegistered(r)) ||
+                       (r.ok && r.data && Array.isArray(r.data.identities) && r.data.identities.length === 0);
+      if(dejaPris && memeAdresse){
+        authUI.d.otp = "";
+        authGo("otp");
+        authUI.info = t("au.emailSent");
+        renderAuth();
+        return;
+      }
+
       if(!r.ok){
         if(isAlreadyRegistered(r)){ authUI.showEmailTaken = true; return authFail(t("au.errExists")); }
         return authFail(authErrorText(r));
@@ -4144,7 +4192,17 @@ async function afterSignedIn(){
   const previousShop = settings && settings.account ? settings.account.shopId : null;
   const incomingShop = row ? row.shop_id : null;
   if(hasData && previousShop && incomingShop && previousShop !== incomingShop){
-    if(!confirm(t("au.otherAccountData"))){
+    // Le registre local va être remplacé. Avant tout, on tente de mettre à l'abri ce
+    // qui n'est pas encore monté au coffre : c'est la seule chose réellement en jeu.
+    // Le reste est déjà en sécurité et redescendra en se reconnectant.
+    if(pendingCount() > 0){
+      try{ await syncPush(); }catch(e){}
+    }
+    // Si tout est monté, on efface en silence : rien ne peut être perdu, il n'y a
+    // donc aucune raison d'inquiéter l'utilisateur à chaque changement de compte.
+    // On ne l'arrête QUE s'il reste des opérations qui n'ont jamais atteint le coffre.
+    const restant = pendingCount();
+    if(restant > 0 && !confirm(t("au.unsyncedLoss").replace("{n}", String(restant)))){
       await authSignOutServer();
       return authFail(t("au.loginCancelled"));
     }
@@ -5012,6 +5070,13 @@ async function doSwitchAccount(){
 
 async function doSignOut(){
   if(!confirm(t("au.signOutConfirm"))) return;
+  // Dernière occasion de mettre à l'abri ce qui n'a pas encore atteint le coffre :
+  // la session est encore ouverte, donc l'envoi est possible. Après, il faudrait se
+  // reconnecter pour y arriver. Un échec ne bloque pas la déconnexion — le registre
+  // reste sur l'appareil et repartira à la prochaine connexion.
+  if(pendingCount() > 0){
+    try{ await syncPush(); }catch(e){}
+  }
   await authSignOutServer();
   if(typeof resetSyncState === "function") resetSyncState();
   isUnlocked = false;
@@ -5052,9 +5117,23 @@ function applyTheme(){
   // Avant qu'un compte existe, on suit le thème choisi sur l'écran d'accueil.
   const isLight = currentTheme()==="light";
   document.body.classList.toggle("theme-light", isLight);
-  // On annonce au système le thème RÉELLEMENT actif. Sans ça, un téléphone en mode
-  // sombre repeint lui-même l'application quand elle est installée (pas dans le navigateur).
-  document.documentElement.style.colorScheme = isLight ? "light" : "dark";
+
+  /* Un téléphone réglé en mode sombre repeint lui-même les pages qu'il croit claires.
+     Dire « light » ne suffit pas : le système comprend « cette page préfère le clair »
+     et se sent malgré tout autorisé à la repeindre. Le mot « only » ferme la porte —
+     il signifie « ce thème et aucun autre, ne touchez à rien ».
+     On l'écrit à trois endroits, car chacun est lu à un moment différent :
+     la racine, le corps de page, et l'étiquette que le système consulte au chargement. */
+  const mode = isLight ? "only light" : "only dark";
+  document.documentElement.style.colorScheme = mode;
+  document.body.style.colorScheme = mode;
+  const meta = document.querySelector('meta[name="color-scheme"]');
+  if(meta) meta.setAttribute("content", mode);
+
+  // La barre du haut suit le fond réel : sinon elle reste sombre au-dessus d'une
+  // application claire, ce qui donne ce bandeau qui jure au démarrage.
+  const barre = document.querySelector('meta[name="theme-color"]');
+  if(barre) barre.setAttribute("content", isLight ? "#f7f1e8" : "#130b18");
 }
 
 // Réinitialisation totale — logique pure, réutilisable quel que soit l'endroit qui la déclenche.
