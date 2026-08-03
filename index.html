@@ -2403,8 +2403,11 @@ async function syncPush(){
     // Envoyés seulement s'ils ont changé, pour ne pas encombrer le réseau.
     // Un VENDEUR ne les envoie jamais : son nom et son téléphone sont les siens, ils
     // ne doivent pas devenir ceux du commerce. Ces réglages appartiennent au propriétaire.
+    // Un appareil qui vient de REJOINDRE le commerce ne les envoie pas non plus tant
+    // qu'il n'a rien reçu : son registre est encore vide, il annoncerait « capital = 0 »
+    // et effacerait le vrai chiffre pour tout le monde.
     const sig = shopSettingsSignature();
-    if(!sellerRO() && syncState.shopSettingsSig !== sig){
+    if(!sellerRO() && !syncState.awaitingFirstPull && syncState.shopSettingsSig !== sig){
       syncState.shopSettingsAt = new Date().toISOString();
       const rec = shopSettingsRecord();
       const rs = await supaCall(
@@ -2655,6 +2658,13 @@ async function syncPull(){
     // On avance le repère seulement si tout s'est bien passé.
     if(newest > since){
       syncState.pulledAt = newest;
+      saveSyncState(syncState);
+    }
+    // L'appareil a maintenant écouté : il peut parler. On baisse le drapeau ICI et
+    // nulle part ailleurs — une descente en échec est sortie plus haut, donc arriver
+    // jusqu'à cette ligne veut bien dire que le coffre a répondu.
+    if(syncState.awaitingFirstPull){
+      syncState.awaitingFirstPull = false;
       saveSyncState(syncState);
     }
     return {ok:true, received:received, changed:changed, error:null};
@@ -4243,6 +4253,20 @@ async function applyAccountToDevice(row){
     }
     state.data.capitalInitial = toGNF(capRaw, settings.currency);
     if(usedFallback) alert(t("ob.noRate"));
+  } else {
+    /* Cet appareil REJOINT un commerce qui existe déjà. Il arrive aveugle : il ne
+       connaît encore ni le capital de départ, ni le compteur de reçus, ni les
+       catégories — son registre local vaut zéro partout.
+       S'il envoyait ses réglages maintenant, il annoncerait « capital = 0 » au coffre
+       et écraserait le vrai chiffre pour TOUS les appareils du commerce. C'est
+       exactement ce qui est arrivé : le capital de départ effacé après un changement
+       de compte, alors que ventes et achats étaient intacts.
+       Règle : on écoute d'abord, on parle ensuite. Ce drapeau bloque l'envoi des
+       réglages et ne retombe qu'après une descente réussie. Un commerce tout neuf
+       n'est pas concerné : lui détient la vérité, son capital part immédiatement. */
+    syncState = syncState || {};
+    syncState.awaitingFirstPull = true;
+    saveSyncState(syncState);
   }
   persist(); // marque au passage toutes les opérations avec la boutique et l'heure
 
