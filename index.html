@@ -118,6 +118,11 @@ nav button.active .nlab{font-weight:bold;}
 .picker-trigger .pt-arrow{color:var(--gold);font-size:11px;flex-shrink:0;}
 #modalRoot .modal-overlay{z-index:700;}
 #pickerRoot .modal-overlay{z-index:800;}
+/* Couche des messages : toujours au-dessus des autres fenêtres, jamais en dessous.
+   Contrairement aux autres fenêtres (feuille qui monte du bas), le message est une
+   petite boîte centrée : il informe puis disparaît, il ne contient pas de formulaire. */
+#msgRoot .modal-overlay{z-index:850;align-items:center;padding:20px;}
+#msgRoot .modal-box{border-radius:16px;max-width:360px;padding:22px 20px;}
 #accountPageRoot{position:fixed;inset:0;z-index:650;}
 .acct-page{position:absolute;inset:0;background:var(--bg);transform:translateX(-100%);transition:transform 0.22s ease;overflow-y:auto;display:flex;flex-direction:column;}
 .acct-page.open{transform:translateX(0);}
@@ -191,6 +196,7 @@ nav button.active .nlab{font-weight:bold;}
 </div>
 <div id="modalRoot"></div>
 <div id="pickerRoot"></div>
+<div id="msgRoot"></div>
 <div id="accountPageRoot" style="display:none;"></div>
 <div id="toastRoot"></div>
 <div id="printArea"></div>
@@ -203,7 +209,7 @@ nav button.active .nlab{font-weight:bold;}
 // quelle version tourne réellement sur un appareil — sans lui, impossible de dire si
 // une correction livrée est bien arrivée jusqu'au téléphone. À garder identique au
 // numéro de cache du service-worker.js à chaque livraison.
-const APP_VERSION = "v111";
+const APP_VERSION = "v112";
 const STORE_KEY = "registrepro_data_v2";
 const SETTINGS_KEY = "registrepro_settings_v2";
 
@@ -256,6 +262,7 @@ const LANGUAGES = { fr: "Français", en: "English" };
 
 const I18N = {
   fr: {
+    "msg.ok": "OK",
     "header.capital": "CAPITAL DISPO",
     "header.register": "REGISTRE COMMERCIAL",
     "nav.home": "Accueil",
@@ -990,6 +997,7 @@ const I18N = {
     "rep.estProfit": "Bénéfice estimé"
   },
   en: {
+    "msg.ok": "OK",
     "header.capital": "AVAILABLE CAPITAL",
     "header.register": "BUSINESS REGISTER",
     "nav.home": "Home",
@@ -4373,7 +4381,7 @@ async function applyAccountToDevice(row){
       if(!ok) usedFallback = true;
     }
     state.data.capitalInitial = toGNF(capRaw, settings.currency);
-    if(usedFallback) alert(t("ob.noRate"));
+    if(usedFallback) showMessage(t("ob.noRate"));
   } else {
     /* Cet appareil REJOINT un commerce qui existe déjà. Il arrive aveugle : il ne
        connaît encore ni le capital de départ, ni le compteur de reçus, ni les
@@ -4784,8 +4792,8 @@ function openAddSellerModal(){
     const name = document.getElementById("nsName").value.trim();
     const phone = document.getElementById("nsPhone").value.trim();
     const pw = document.getElementById("nsPw").value;
-    if(name.length < 2){ alert(t("sel.errName")); return; }
-    if(pw.length < 8){ alert(t("sel.errPw")); return; }
+    if(name.length < 2){ showMessage(t("sel.errName")); return; }
+    if(pw.length < 8){ showMessage(t("sel.errPw")); return; }
 
     sellersBusy = true;
     const btn = document.getElementById("nsSave");
@@ -4794,7 +4802,7 @@ function openAddSellerModal(){
     sellersBusy = false;
     if(!r.ok){
       btn.disabled = false; btn.textContent = t("sel.create");
-      alert(sellerErrorText(r.error));
+      showMessage(sellerErrorText(r.error));
       return;
     }
     const s = r.data.seller;
@@ -4925,8 +4933,8 @@ function openEditSellerModal(sellerId){
     const name = document.getElementById("esName").value.trim();
     const phone = document.getElementById("esPhone").value.trim();
     const pw = document.getElementById("esPw").value;
-    if(name.length < 2){ alert(t("sel.errName")); return; }
-    if(pw && pw.length < 8){ alert(t("sel.errPw")); return; }
+    if(name.length < 2){ showMessage(t("sel.errName")); return; }
+    if(pw && pw.length < 8){ showMessage(t("sel.errPw")); return; }
 
     sellersBusy = true;
     const btn = document.getElementById("esSave");
@@ -4935,7 +4943,7 @@ function openEditSellerModal(sellerId){
     if(pw) payload.password = pw;
     const r = await sellersCall(payload);
     sellersBusy = false;
-    if(!r.ok){ btn.disabled = false; alert(sellerErrorText(r.error)); return; }
+    if(!r.ok){ btn.disabled = false; showMessage(sellerErrorText(r.error)); return; }
     closeModal();
     await refreshSellersList();
     showToast(t("sel.updated"));
@@ -4951,7 +4959,7 @@ async function toggleSeller(sellerId){
   sellersBusy = true;
   const r = await sellersCall({action:"update", sellerId:sellerId, active:!s.active});
   sellersBusy = false;
-  if(!r.ok){ alert(sellerErrorText(r.error)); return; }
+  if(!r.ok){ showMessage(sellerErrorText(r.error)); return; }
   await refreshSellersList();
   showToast(s.active ? t("sel.suspendedToast") : t("sel.reactivatedToast"));
 }
@@ -4966,7 +4974,7 @@ async function deleteSeller(sellerId){
   sellersBusy = true;
   const r = await sellersCall({action:"delete", sellerId:sellerId});
   sellersBusy = false;
-  if(!r.ok){ alert(sellerErrorText(r.error)); return; }
+  if(!r.ok){ showMessage(sellerErrorText(r.error)); return; }
   await refreshSellersList();
   showToast(t("sel.deletedToast"));
 }
@@ -5073,7 +5081,7 @@ function openAccountPage(){
   const apSaveBtn = document.getElementById("apSave");
   if(apSaveBtn) apSaveBtn.onclick = ()=>{
     const name = document.getElementById("apName").value.trim();
-    if(!name){ alert(t("prod.nameRequired")); return; }
+    if(!name){ showMessage(t("prod.nameRequired")); return; }
     settings.businessName = name;
     settings.ownerName = document.getElementById("apOwner").value.trim();
     settings.contact = document.getElementById("apContact").value.trim();
@@ -5422,6 +5430,35 @@ function openModal(html){
   if(typeof window!=="undefined" && window.rpArmBack) window.rpArmBack();
 }
 function closeModal(){ document.getElementById("modalRoot").innerHTML=""; }
+
+/* ════════════════════════════════════════════════
+   MESSAGE MAISON — remplace la fenêtre du navigateur
+   L'ancienne fenêtre affichait l'adresse du site en haut, ce qui donnait
+   l'impression d'un site web et non d'une application.
+   Cette couche vit dans son PROPRE conteneur (#msgRoot), frère de #app :
+   un render() ne peut donc jamais l'effacer, et elle ne remplace jamais
+   la fenêtre ouverte en dessous (le formulaire en cours reste intact).
+════════════════════════════════════════════════ */
+function showMessage(text){
+  const root = document.getElementById("msgRoot");
+  if(!root) return;
+  root.innerHTML = `
+    <div class="modal-overlay" id="msgOverlay">
+      <div class="modal-box">
+        <div style="font-size:14px;line-height:1.55;color:var(--text);white-space:pre-wrap;margin-bottom:18px;">${esc(text==null?"":String(text))}</div>
+        <button class="btn" style="background:var(--gold);" id="msgOkBtn">${esc(t("msg.ok"))}</button>
+      </div>
+    </div>`;
+  const okBtn = document.getElementById("msgOkBtn");
+  if(okBtn) okBtn.onclick = closeMessage;
+  const ov = document.getElementById("msgOverlay");
+  if(ov) ov.addEventListener("click", e=>{ if(e.target.id==="msgOverlay") closeMessage(); });
+  if(typeof window!=="undefined" && window.rpArmBack) window.rpArmBack();
+}
+function closeMessage(){
+  const root = document.getElementById("msgRoot");
+  if(root) root.innerHTML="";
+}
 
 
 /* ════════════════════════════════════════════════
@@ -5790,7 +5827,7 @@ function bindActionHandlers(container, stats){
         if(paid > owedWithout){
           // CAS 2 : le client a d'autres ardoises, et ses paiements dépasseraient ce qu'il
           // resterait à devoir sans cette vente → impossible de séparer proprement. On refuse.
-          alert(t("act.trashCreditBlockedMulti"));
+          showMessage(t("act.trashCreditBlockedMulti"));
           return;
         }
         // Sinon (paiements encore couverts par les autres ardoises) : mise à la corbeille normale.
@@ -5914,7 +5951,7 @@ function bindActionHandlers(container, stats){
       const val = document.getElementById("setPin").value.trim();
       const len = settings.pinLength||4;
       const re = new RegExp("^\\d{"+len+"}$");
-      if(!re.test(val)){ alert(t("set.pinDigitsAlertA")+len+t("set.pinDigitsAlertB")); return; }
+      if(!re.test(val)){ showMessage(t("set.pinDigitsAlertA")+len+t("set.pinDigitsAlertB")); return; }
       settings.pinHash = await hashPin(val);
       delete settings.pin;
       settings.pinFailCount = 0; settings.pinLockedUntil = 0;
@@ -5966,7 +6003,7 @@ function bindActionHandlers(container, stats){
     else if(action==="confirmAddCategory") el.onclick=()=>{
       const val = document.getElementById("catAddInput").value;
       const res = addCategory(val);
-      if(!res.ok){ alert(res.msg); return; }
+      if(!res.ok){ showMessage(res.msg); return; }
       catUI.adding = false; render();
       showToast(t("cat.added"));
     };
@@ -5979,7 +6016,7 @@ function bindActionHandlers(container, stats){
       const oldName = el.dataset.cat;
       const val = document.getElementById("catEditInput").value;
       const res = renameCategory(oldName, val);
-      if(!res.ok){ alert(res.msg); return; }
+      if(!res.ok){ showMessage(res.msg); return; }
       catUI.editing = null; render();
       showToast(t("cat.renamed"));
     };
@@ -5987,7 +6024,7 @@ function bindActionHandlers(container, stats){
       const name = el.dataset.cat;
       if(!confirm('Supprimer la catégorie "'+name+'" ?')) return;
       const res = deleteCategory(name);
-      if(res.affected>0) alert(res.affected+" "+t("cat.affectedProductsA"));
+      if(res.affected>0) showMessage(res.affected+" "+t("cat.affectedProductsA"));
       render();
       showToast(t("cat.deleted"),"error");
     };
@@ -5999,7 +6036,7 @@ function bindActionHandlers(container, stats){
     else if(action==="confirmAddExpCategory") el.onclick=()=>{
       const val = document.getElementById("expCatAddInput").value;
       const res = addExpenseCategory(val);
-      if(!res.ok){ alert(res.msg); return; }
+      if(!res.ok){ showMessage(res.msg); return; }
       expCatUI.adding = false; render();
       showToast(t("cat.added"));
     };
@@ -6012,7 +6049,7 @@ function bindActionHandlers(container, stats){
       const oldName = el.dataset.cat;
       const val = document.getElementById("expCatEditInput").value;
       const res = renameExpenseCategory(oldName, val);
-      if(!res.ok){ alert(res.msg); return; }
+      if(!res.ok){ showMessage(res.msg); return; }
       expCatUI.editing = null; render();
       showToast(t("cat.renamed"));
     };
@@ -6020,7 +6057,7 @@ function bindActionHandlers(container, stats){
       const name = el.dataset.cat;
       if(!confirm('Supprimer la catégorie "'+name+'" ?')) return;
       const res = deleteExpenseCategory(name);
-      if(res.affected>0) alert(res.affected+" "+t("cat.affectedExpensesA"));
+      if(res.affected>0) showMessage(res.affected+" "+t("cat.affectedExpensesA"));
       render();
       showToast(t("cat.deleted"),"error");
     };
@@ -6081,13 +6118,13 @@ function attachContentHandlers(stats){
       try{
         payload = JSON.parse(ev.target.result);
       }catch(err){
-        alert(t("set.invalidJson"));
+        showMessage(t("set.invalidJson"));
         importFile.value = "";
         return;
       }
       const check = validateBackupPayload(payload);
       if(!check.ok){
-        alert(t("set.cantRestore")+check.msg);
+        showMessage(t("set.cantRestore")+check.msg);
         importFile.value = "";
         return;
       }
@@ -6130,7 +6167,7 @@ function attachContentHandlers(stats){
       ensureCategoriesIncludeUsed();
       ensureExpenseCategoriesIncludeUsed();
       migrateCreditClients();
-      alert(t("act.restoreSuccess"));
+      showMessage(t("act.restoreSuccess"));
       showToast(t("set.backupRestored"));
       importFile.value = "";
     };
@@ -6299,7 +6336,7 @@ function openEditProductModal(prodId){
       groups:[{items:getCategories().map(c=>({value:c,label:c}))}],
       topAction:{label:t("cat.addAction"), placeholder:t("cat.addProductPh"), onClick:(val)=>{
         const res = addCategory(val);
-        if(!res.ok){ alert(res.msg); return; }
+        if(!res.ok){ showMessage(res.msg); return; }
         epCategory = val;
         closePicker();
         updateCatTrigger();
@@ -6312,8 +6349,8 @@ function openEditProductModal(prodId){
 
   document.getElementById("epSave").onclick = ()=>{
     const name = document.getElementById("epName").value.trim();
-    if(!name){ alert(t("prod.nameRequired")); return; }
-    if(!epCategory){ alert(t("cat.chooseAlert")); return; }
+    if(!name){ showMessage(t("prod.nameRequired")); return; }
+    if(!epCategory){ showMessage(t("cat.chooseAlert")); return; }
     prod.name = name;
     prod.category = epCategory;
     closeModal(); saveData();
@@ -6359,7 +6396,7 @@ function openAddProductModal(){
       groups:[{items:getCategories().map(c=>({value:c,label:c}))}],
       topAction:{label:t("cat.addAction"), placeholder:t("cat.addProductPh"), onClick:(val)=>{
         const res = addCategory(val);
-        if(!res.ok){ alert(res.msg); return; }
+        if(!res.ok){ showMessage(res.msg); return; }
         mpCategory = val;
         closePicker();
         updateCatTrigger();
@@ -6372,8 +6409,8 @@ function openAddProductModal(){
 
   document.getElementById("mpSave").onclick = ()=>{
     const name = document.getElementById("mpName").value.trim();
-    if(!name){ alert(t("prod.nameRequired")); return; }
-    if(!mpCategory){ alert(t("cat.chooseAlert")); return; }
+    if(!name){ showMessage(t("prod.nameRequired")); return; }
+    if(!mpCategory){ showMessage(t("cat.chooseAlert")); return; }
     state.data.products.push({id:uid(),name,category:mpCategory});
     closeModal(); saveData();
     showToast(t("prod.added"));
@@ -6387,7 +6424,7 @@ function openAddProductModal(){
 ════════════════════════════════════════════════ */
 function openVariantFormModal(existingVariant){
   const d = state.data;
-  if(d.products.length===0){ alert(t("var.createFirst")); return; }
+  if(d.products.length===0){ showMessage(t("var.createFirst")); return; }
   const isEdit = !!existingVariant;
   let selectedProductId = isEdit ? existingVariant.productId : d.products[0].id;
 
@@ -7288,7 +7325,7 @@ function openAddPurchaseModal(existingPurchase){
     };
     document.getElementById("mpuSave").onclick = ()=>{
       const valid = purchaseItems.filter(it=>it.variantId && +it.qty>0 && +it.unitCost>0);
-      if(!valid.length){ alert(t("form.noValidItem")); return; }
+      if(!valid.length){ showMessage(t("form.noValidItem")); return; }
       const newItems = valid.map(it=>({variantId:it.variantId,qty:+it.qty,unitCost:toGNF(+it.unitCost, cur())}));
       const newDelivery = toGNF(+purchaseItems._delivery||0, cur());
       const newCustoms = toGNF(+purchaseItems._customs||0, cur());
@@ -7458,9 +7495,9 @@ function openAddOrderModal(existing){
     const save = document.getElementById("oiSave");
     if(save) save.onclick = ()=>{
       const client = (document.getElementById("moClient").value||"").trim();
-      if(!client){ alert(t("ord.clientReqAlert")); return; }
+      if(!client){ showMessage(t("ord.clientReqAlert")); return; }
       const valid = orderItems.filter(it=>it.variantId && +it.qty>0 && +it.salePrice>0);
-      if(!valid.length){ alert(t("ord.noValidItem")); return; }
+      if(!valid.length){ showMessage(t("ord.noValidItem")); return; }
       const items = valid.map(it=>({variantId:it.variantId, qty:+it.qty, salePrice: toGNF(+it.salePrice, cur())}));
       const payload = {
         client,
@@ -7672,7 +7709,7 @@ function openAddSaleModal(existingGroup, fromOrder){
     document.getElementById("siSave").onclick = ()=>{
       const stats = computeStats();
       const valid = saleItems.filter(it=>it.variantId && +it.qty>0 && +it.salePrice>0);
-      if(!valid.length){ alert(t("form.noValidItem")); return; }
+      if(!valid.length){ showMessage(t("form.noValidItem")); return; }
       // On additionne d'abord les quantités par variante sur TOUTE la vente avant de
       // comparer au stock — sinon, si le même article apparaît sur 2 lignes différentes,
       // chaque ligne passerait la vérification individuellement même si le total dépasse le stock.
@@ -7683,7 +7720,7 @@ function openAddSaleModal(existingGroup, fromOrder){
         const demanded = consumedByVariant[variantId];
         if(demanded>stock){
           const v = d.variants.find(x=>x.id===variantId);
-          alert(t("sale.stockShortA")+" "+(v?v.label:t("sale.anItem"))+" : "+stock+" "+t("sale.stockShortB")+" "+demanded+" "+t("sale.stockShortC"));
+          showMessage(t("sale.stockShortA")+" "+(v?v.label:t("sale.anItem"))+" : "+stock+" "+t("sale.stockShortB")+" "+demanded+" "+t("sale.stockShortC"));
           return;
         }
       }
@@ -7691,15 +7728,15 @@ function openAddSaleModal(existingGroup, fromOrder){
       const clientVal = document.getElementById("msClient").value.trim();
       const clientPhoneVal = document.getElementById("msClientPhone").value.trim();
       const sellerVal = document.getElementById("msSeller").value.trim() || settings.ownerName || "";
-      if(isCredit && !clientVal){ alert(t("sale.clientReqAlert")); return; }
+      if(isCredit && !clientVal){ showMessage(t("sale.clientReqAlert")); return; }
 
       const sum = computeSummary();
       let paidNow = 0;
       if(isCredit){
         const paidNowInput = document.getElementById("msPaidNow");
         paidNow = paidNowInput ? (+paidNowInput.value || 0) : 0;
-        if(paidNow < 0){ alert(t("sale.paidNeg")); return; }
-        if(paidNow > sum.totalDisplay){ alert(t("sale.paidTooMuch")+" ("+fmtRaw(sum.totalDisplay)+")."); return; }
+        if(paidNow < 0){ showMessage(t("sale.paidNeg")); return; }
+        if(paidNow > sum.totalDisplay){ showMessage(t("sale.paidTooMuch")+" ("+fmtRaw(sum.totalDisplay)+")."); return; }
       }
 
       function finalizeSale(clientId){
@@ -7866,7 +7903,7 @@ function openAddExpenseModal(existing){
     // Description facultative : si elle est vide, la catégorie servira de titre à l'affichage.
     const label = document.getElementById("meLabel").value.trim();
     const amount = +document.getElementById("meAmount").value;
-    if(!amount || amount<=0){ alert(t("pay.invalidAmount")); return; }
+    if(!amount || amount<=0){ showMessage(t("pay.invalidAmount")); return; }
     if(isEdit){
       // Correction d'une dépense existante : on garde son id, sa date et son statut
       // (actif/archivé) ; on ne met à jour que la description, la catégorie et le montant.
@@ -7985,10 +8022,10 @@ function openAddPaymentModal(clientId, clientName, clientPhone, remainingGNF){
 
   document.getElementById("paySave").onclick = ()=>{
     const amountInput = +document.getElementById("payAmount").value;
-    if(!amountInput || amountInput<=0){ alert(t("pay.invalidAmount")); return; }
+    if(!amountInput || amountInput<=0){ showMessage(t("pay.invalidAmount")); return; }
     const amountGNF = toGNF(amountInput, cur());
     if(Math.round(amountGNF) > Math.round(remainingGNF)+1){
-      alert(t("pay.tooMuchA")+" ("+fmt(remainingGNF)+")"+t("pay.tooMuchB"));
+      showMessage(t("pay.tooMuchA")+" ("+fmt(remainingGNF)+")"+t("pay.tooMuchB"));
       return;
     }
     const paymentId = uid();
@@ -8355,7 +8392,7 @@ function openStatementModal(fromISO, toISO, filter){
       const a = document.createElement("a");
       a.href = url; a.download = fileBase+".png";
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    }catch(e){ alert(t("rcp.imageError")); }
+    }catch(e){ showMessage(t("rcp.imageError")); }
   };
 
   document.getElementById("stShare").onclick = ()=>{
@@ -8369,11 +8406,11 @@ function openStatementModal(fromISO, toISO, filter){
           } else if(navigator.share){
             await navigator.share({title:t("st.shareTitle")+settings.businessName, text: meta.periodLabel+" — "+t("st.closingShare")+fmt(data.soldeCloture)});
           } else {
-            alert(t("st.shareUnavailable"));
+            showMessage(t("st.shareUnavailable"));
           }
         }catch(e2){ /* utilisateur a annulé le partage, rien à faire */ }
       }, "image/png");
-    }catch(e){ alert(t("st.shareFailed")); }
+    }catch(e){ showMessage(t("st.shareFailed")); }
   };
 
   document.getElementById("stPrint").onclick = ()=>{
@@ -9138,7 +9175,7 @@ function openPaymentReceiptModal(paymentId){
       const a = document.createElement("a");
       a.href = url; a.download = payment.receiptNo+".png";
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    }catch(e){ alert(t("rcp.imageError")); }
+    }catch(e){ showMessage(t("rcp.imageError")); }
   };
 
   document.getElementById("rcShare").onclick = ()=>{
@@ -9152,11 +9189,11 @@ function openPaymentReceiptModal(paymentId){
           } else if(navigator.share){
             await navigator.share({title:t("rcp.sharePayment"), text: settings.businessName+" - "+payment.receiptNo+" - "+fmt(payment.amount)});
           } else {
-            alert(t("rcp.shareUnavailable"));
+            showMessage(t("rcp.shareUnavailable"));
           }
         }catch(e2){ /* utilisateur a annulé le partage, rien à faire */ }
       }, "image/png");
-    }catch(e){ alert(t("rcp.shareFailed")); }
+    }catch(e){ showMessage(t("rcp.shareFailed")); }
   };
 
   document.getElementById("rcPrint").onclick = ()=>{
@@ -9343,7 +9380,7 @@ function openOrderReceiptModal(orderId){
       const a = document.createElement("a");
       a.href = url; a.download = (o.orderNo||"commande")+".png";
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    }catch(e){ alert(t("rcp.imageError")); }
+    }catch(e){ showMessage(t("rcp.imageError")); }
   };
 
   document.getElementById("orShare").onclick = ()=>{
@@ -9357,11 +9394,11 @@ function openOrderReceiptModal(orderId){
           } else if(navigator.share){
             await navigator.share({title:t("rcp.shareOrder"), text: settings.businessName+" - "+(o.orderNo||"")+" - "+fmt(grandTotal)});
           } else {
-            alert(t("rcp.shareUnavailable"));
+            showMessage(t("rcp.shareUnavailable"));
           }
         }catch(e2){ /* partage annulé */ }
       }, "image/png");
-    }catch(e){ alert(t("rcp.shareFailed")); }
+    }catch(e){ showMessage(t("rcp.shareFailed")); }
   };
 
   document.getElementById("orPrint").onclick = ()=>{
@@ -9685,7 +9722,7 @@ function openReceiptModal(groupId){
       const a = document.createElement("a");
       a.href = url; a.download = receiptNo+".png";
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    }catch(e){ alert(t("rcp.imageError")); }
+    }catch(e){ showMessage(t("rcp.imageError")); }
   };
 
   document.getElementById("rcShare").onclick = ()=>{
@@ -9699,11 +9736,11 @@ function openReceiptModal(groupId){
           } else if(navigator.share){
             await navigator.share({title:t("rcp.shareSale"), text: settings.businessName+" - "+receiptNo+" - "+t("rcp.total")+": "+fmt(grandTotal)});
           } else {
-            alert(t("rcp.shareUnavailable"));
+            showMessage(t("rcp.shareUnavailable"));
           }
         }catch(e2){ /* utilisateur a annulé le partage, rien à faire */ }
       }, "image/png");
-    }catch(e){ alert(t("rcp.shareFailed")); }
+    }catch(e){ showMessage(t("rcp.shareFailed")); }
   };
 
   document.getElementById("rcPrint").onclick = ()=>{
@@ -9768,6 +9805,10 @@ try{ window.addEventListener("online", function(){ if(typeof syncFull==="functio
   try{ history.replaceState({rp:true}, ""); }catch(e){ return; }
 
   function topLayerClose(){
+    // Le message est la couche la plus haute : le retour le ferme en premier,
+    // sinon il fermerait le formulaire ouvert en dessous.
+    const msg = document.getElementById("msgRoot");
+    if(msg && msg.innerHTML.trim()){ return closeMessage; }
     const ov = document.getElementById("accountPageRoot");
     if(ov && ov.style.display !== "none" && ov.innerHTML.trim()){ return closeAccountPage; }
     const picker = document.getElementById("pickerRoot");
