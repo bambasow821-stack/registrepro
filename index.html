@@ -209,7 +209,7 @@ nav button.active .nlab{font-weight:bold;}
 // quelle version tourne réellement sur un appareil — sans lui, impossible de dire si
 // une correction livrée est bien arrivée jusqu'au téléphone. À garder identique au
 // numéro de cache du service-worker.js à chaque livraison.
-const APP_VERSION = "v112";
+const APP_VERSION = "v114";
 const STORE_KEY = "registrepro_data_v2";
 const SETTINGS_KEY = "registrepro_settings_v2";
 
@@ -263,6 +263,11 @@ const LANGUAGES = { fr: "Français", en: "English" };
 const I18N = {
   fr: {
     "msg.ok": "OK",
+    "act.trashExpenseConfirm": "Cette dépense a-t-elle vraiment eu lieu ? Si oui, utilise plutôt 🗄️ Archiver — la corbeille retire cette dépense de tes totaux, comme si elle n'avait jamais existé.\n\nMettre quand même cette dépense à la corbeille ?",
+    "act.deletedOn": "Supprimé le",
+    "msg.yes": "Oui",
+    "msg.no": "Annuler",
+    "cat.deleteConfirm": "Supprimer la catégorie \"{name}\" ?",
     "header.capital": "CAPITAL DISPO",
     "header.register": "REGISTRE COMMERCIAL",
     "nav.home": "Accueil",
@@ -998,6 +1003,11 @@ const I18N = {
   },
   en: {
     "msg.ok": "OK",
+    "act.trashExpenseConfirm": "Did this expense really happen? If so, use 🗄️ Archive instead — the trash removes this expense from your totals, as if it never existed.\n\nMove this expense to the trash anyway?",
+    "act.deletedOn": "Deleted on",
+    "msg.yes": "Yes",
+    "msg.no": "Cancel",
+    "cat.deleteConfirm": "Delete category \"{name}\"?",
     "header.capital": "AVAILABLE CAPITAL",
     "header.register": "BUSINESS REGISTER",
     "nav.home": "Home",
@@ -2635,6 +2645,12 @@ function applyIncomingSettings(row){
 // Va chercher au coffre tout ce qui a changé depuis la dernière fois.
 // Renvoie {ok, received, changed, error}. Ne lève jamais d'exception.
 async function syncPull(){
+  // VERROU 3 — une question est posée à l'utilisateur : la descente attend le tour
+  // suivant. L'ancienne question du navigateur gelait tout le téléphone ; celle-ci
+  // ne gèle rien. Sans ce verrou, les données lues AVANT la question pourraient être
+  // remplacées pendant l'attente : la suppression demandée porterait alors sur un
+  // objet devenu orphelin et ne se ferait pas, sans que rien ne le signale.
+  if(typeof askBusy !== "undefined" && askBusy){ return {ok:false, received:0, changed:0, error:"question-open"}; }
   if(!auth || !auth.access_token){ return {ok:false, received:0, changed:0, error:"no-session"}; }
   if(!settings || !settings.account){ return {ok:false, received:0, changed:0, error:"no-account"}; }
   // VERROU 1 — une descente lancée pendant un changement de compte verserait les
@@ -4267,7 +4283,7 @@ async function afterSignedIn(){
     // Si tout est monté, on efface en silence : rien ne peut être perdu, il n'y a
     // donc aucune raison d'inquiéter l'utilisateur à chaque changement de compte.
     // On ne l'arrête QUE s'il reste des opérations qui n'ont jamais atteint le coffre.
-    if(restant > 0 && !confirm(t("au.unsyncedLoss").replace("{n}", String(restant)))){
+    if(restant > 0 && !await ask(t("au.unsyncedLoss").replace("{n}", String(restant)))){
       await authSignOutServer();
       if(typeof stopSyncLoop === "function") stopSyncLoop();
       return authFail(t("au.loginCancelled"));
@@ -4955,7 +4971,7 @@ async function toggleSeller(sellerId){
   const s = sellersList.find(function(x){ return x.id === sellerId; });
   if(!s || sellersBusy) return;
   const msg = s.active ? t("sel.suspendConfirm") : t("sel.reactivateConfirm");
-  if(!confirm(msg.replace("{name}", s.full_name))) return;
+  if(!await ask(msg.replace("{name}", s.full_name))) return;
   sellersBusy = true;
   const r = await sellersCall({action:"update", sellerId:sellerId, active:!s.active});
   sellersBusy = false;
@@ -4970,7 +4986,7 @@ async function toggleSeller(sellerId){
 async function deleteSeller(sellerId){
   const s = sellersList.find(function(x){ return x.id === sellerId; });
   if(!s || sellersBusy) return;
-  if(!confirm(t("sel.deleteConfirm").replace("{name}", s.full_name))) return;
+  if(!await ask(t("sel.deleteConfirm").replace("{name}", s.full_name))) return;
   sellersBusy = true;
   const r = await sellersCall({action:"delete", sellerId:sellerId});
   sellersBusy = false;
@@ -5125,7 +5141,7 @@ function closeAccountPage(){
 // reconnecter avec l'autre compte. Garder deux comptes ouverts en même temps
 // viendra avec la synchronisation en ligne.
 async function doSwitchAccount(){
-  if(!confirm(t("au.switchConfirm"))) return;
+  if(!await ask(t("au.switchConfirm"))) return;
   await authSignOutServer();
   if(typeof stopSyncLoop === "function") stopSyncLoop();
   if(typeof resetSyncState === "function") resetSyncState();
@@ -5136,7 +5152,7 @@ async function doSwitchAccount(){
 }
 
 async function doSignOut(){
-  if(!confirm(t("au.signOutConfirm"))) return;
+  if(!await ask(t("au.signOutConfirm"))) return;
   // Dernière occasion de mettre à l'abri ce qui n'a pas encore atteint le coffre :
   // la session est encore ouverte, donc l'envoi est possible. Après, il faudrait se
   // reconnecter pour y arriver. Un échec ne bloque pas la déconnexion — le registre
@@ -5460,6 +5476,56 @@ function closeMessage(){
   if(root) root.innerHTML="";
 }
 
+/* ════════════════════════════════════════════════
+   QUESTION MAISON — remplace la question du navigateur
+   L'ancienne question gelait tout le téléphone en attendant la réponse.
+   Celle-ci ne gèle rien : elle rend une PROMESSE de réponse.
+   Le code appelant écrit « si l'utilisateur n'a pas dit oui, on s'arrête »,
+   et rien ne s'exécute avant que la réponse soit connue.
+   Verrou : tant qu'une question est ouverte, une deuxième ne peut pas
+   s'ouvrir (protège du double-clic sur un bouton de suppression).
+════════════════════════════════════════════════ */
+let askBusy = false;
+function ask(text){
+  return new Promise(resolve=>{
+    const root = document.getElementById("msgRoot");
+    if(!root || askBusy){ resolve(false); return; }
+    askBusy = true;
+    let repondu = false;
+    const repondre = (rep)=>{
+      if(repondu) return;
+      repondu = true; askBusy = false;
+      if(root) root.innerHTML = "";
+      resolve(rep);
+    };
+    root.innerHTML = `
+      <div class="modal-overlay" id="askOverlay">
+        <div class="modal-box">
+          <div style="font-size:14px;line-height:1.55;color:var(--text);white-space:pre-wrap;margin-bottom:18px;">${esc(text==null?"":String(text))}</div>
+          <div style="display:flex;gap:10px;">
+            <button class="btn" style="background:transparent;border:1px solid var(--border);color:var(--sub);" id="askNoBtn">${esc(t("msg.no"))}</button>
+            <button class="btn" style="background:var(--gold);" id="askYesBtn">${esc(t("msg.yes"))}</button>
+          </div>
+        </div>
+      </div>`;
+    const no = document.getElementById("askNoBtn");
+    if(no) no.onclick = ()=>repondre(false);
+    const yes = document.getElementById("askYesBtn");
+    if(yes) yes.onclick = ()=>repondre(true);
+    const ov = document.getElementById("askOverlay");
+    // Toucher à côté ou appuyer sur retour = NON. Par sécurité, jamais oui.
+    if(ov) ov.addEventListener("click", e=>{ if(e.target.id==="askOverlay") repondre(false); });
+    if(typeof window!=="undefined" && window.rpArmBack) window.rpArmBack();
+  });
+}
+function closeAsk(){
+  const no = document.getElementById("askNoBtn");
+  if(no && no.onclick){ no.onclick(); return; }
+  const root = document.getElementById("msgRoot");
+  if(root) root.innerHTML="";
+  askBusy = false;
+}
+
 
 /* ════════════════════════════════════════════════
    NOTIFICATIONS DISCRÈTES (toasts)
@@ -5650,8 +5716,8 @@ function bindActionHandlers(container, stats){
       state.expandedProductId = state.expandedProductId===id ? null : id;
       render();
     };
-    else if(action==="deleteVariant") el.onclick=()=>{
-      if(!confirm(t("var.deleteConfirm"))) return;
+    else if(action==="deleteVariant") el.onclick=async ()=>{
+      if(!await ask(t("var.deleteConfirm"))) return;
       if(typeof markDeletedForSync === "function") markDeletedForSync("variants", el.dataset.id);
       state.data.variants = state.data.variants.filter(v=>v.id!==el.dataset.id);
       saveData();
@@ -5695,10 +5761,10 @@ function bindActionHandlers(container, stats){
       // bougera l'argent et le stock (contrôle de stock, comptant/crédit, reçu...).
       openAddSaleModal(null, o);
     };
-    else if(action==="cancelOrder") el.onclick=()=>{
+    else if(action==="cancelOrder") el.onclick=async ()=>{
       const o = (state.data.orders||[]).find(x=>x.id===el.dataset.id);
       if(!o) return;
-      if(!confirm(t("act.cancelOrderConfirmA")+(o.client||t("act.thisClient"))+t("act.cancelOrderConfirmB"))) return;
+      if(!await ask(t("act.cancelOrderConfirmA")+(o.client||t("act.thisClient"))+t("act.cancelOrderConfirmB"))) return;
       o.status = "cancelled";
       saveData();
       showToast(t("act.orderCancelled"),"error");
@@ -5710,11 +5776,11 @@ function bindActionHandlers(container, stats){
       saveData();
       showToast(t("act.orderReopened"));
     };
-    else if(action==="permDeleteOrder") el.onclick=()=>{
+    else if(action==="permDeleteOrder") el.onclick=async ()=>{
       if(sellerRO()){ showToast(t("sel.notAllowed"), "error"); return; }
       const o = (state.data.orders||[]).find(x=>x.id===el.dataset.id);
       if(!o) return;
-      if(!confirm(t("act.permDeleteOrderConfirm"))) return;
+      if(!await ask(t("act.permDeleteOrderConfirm"))) return;
       if(typeof markDeletedForSync === "function") markDeletedForSync("orders", o.id);
       state.data.orders = state.data.orders.filter(x=>x.id!==o.id);
       (state.data.deletedLog = state.data.deletedLog || []).push({type:"commande", id:o.id, label:(o.orderNo||"")+" — "+(o.client||"")+" — "+fmt(orderTotalGNF(o)), deletedAt:todayFR()});
@@ -5737,14 +5803,14 @@ function bindActionHandlers(container, stats){
     else if(action==="setReportMovementFilter") el.onclick=()=>{ state.reportMovementFilter = el.dataset.filter; renderPreservingScroll("reportMovementFilterPills"); };
     else if(action==="openStatement") el.onclick=()=>{ openStatementModal(el.dataset.from, el.dataset.to, el.dataset.filter); };
     else if(action==="openClientStatement") el.onclick=()=>openClientStatementModal(el.dataset.clientid);
-    else if(action==="trashPayment") el.onclick=()=>{
+    else if(action==="trashPayment") el.onclick=async ()=>{
       if(sellerRO()){ showToast(t("sel.notAllowed"), "error"); return; }
       const pid = el.dataset.id;
       const p = (state.data.payments||[]).find(x=>x.id===pid);
       if(!p) return;
       // Supprimer un paiement fait remonter la dette du client (il n'a plus versé cette somme).
       // C'est récupérable : le paiement passe à la corbeille, il n'est pas détruit.
-      if(!confirm(t("credit.trashPayConfirmA")+fmt(p.amount)+t("credit.trashPayConfirmB"))) return;
+      if(!await ask(t("credit.trashPayConfirmA")+fmt(p.amount)+t("credit.trashPayConfirmB"))) return;
       p.status = "trash";
       saveData();
       showToast(t("credit.payTrashedToast"),"error");
@@ -5762,9 +5828,9 @@ function bindActionHandlers(container, stats){
       openAddPaymentModal(el.dataset.clientid, el.dataset.client, el.dataset.phone, +el.dataset.remaining);
     };
     else if(action==="openPaymentReceipt") el.onclick=()=>openPaymentReceiptModal(el.dataset.id);
-    else if(action==="deletePurchase") el.onclick=()=>{
+    else if(action==="deletePurchase") el.onclick=async ()=>{
       const msg = t("act.trashPurchaseConfirm");
-      if(!confirm(msg)) return;
+      if(!await ask(msg)) return;
       const p = state.data.purchases.find(x=>x.id===el.dataset.id);
       if(p) p.status = "trash";
       saveData();
@@ -5788,9 +5854,9 @@ function bindActionHandlers(container, stats){
       saveData();
       showToast(t("act.purchaseRestored"));
     };
-    else if(action==="permDeletePurchase") el.onclick=()=>{
+    else if(action==="permDeletePurchase") el.onclick=async ()=>{
       if(sellerRO()){ showToast(t("sel.notAllowed"), "error"); return; }
-      if(!confirm(t("act.permDeletePurchaseConfirm"))) return;
+      if(!await ask(t("act.permDeletePurchaseConfirm"))) return;
       const p = state.data.purchases.find(x=>x.id===el.dataset.id);
       if(p){
         state.data.deletedLog.push({type:"achat", id:p.id, label:(p.note||t("act.noteless"))+" — "+p.items.length+" article(s)", deletedAt:todayFR()});
@@ -5800,7 +5866,7 @@ function bindActionHandlers(container, stats){
       saveData();
       showToast(t("act.purchasePermDeleted"),"error");
     };
-    else if(action==="deleteSaleGroup") el.onclick=()=>{
+    else if(action==="deleteSaleGroup") el.onclick=async ()=>{
       const gid = el.dataset.id;
       const group = getSaleGroups().find(g=>g.id===gid);
       // Cas particulier des ventes à crédit qui ont déjà reçu des paiements : un paiement
@@ -5817,7 +5883,7 @@ function bindActionHandlers(container, stats){
           // CAS 1 : c'est la seule ardoise de crédit du client → tous ses paiements vont
           // forcément dessus. On propose de jeter la vente ET ses paiements ensemble.
           // Chaque paiement est étiqueté (trashedWith) pour ne remonter QUE lui à la restauration.
-          if(!confirm(t("act.trashCreditWithPayA")+fmt(paid)+t("act.trashCreditWithPayB"))) return;
+          if(!await ask(t("act.trashCreditWithPayA")+fmt(paid)+t("act.trashCreditWithPayB"))) return;
           state.data.sales.forEach(s=>{ if((s.groupId||s.id)===gid) s.status = "trash"; });
           clientPayments.forEach(p=>{ p.status = "trash"; p.trashedWith = gid; });
           saveData();
@@ -5833,7 +5899,7 @@ function bindActionHandlers(container, stats){
         // Sinon (paiements encore couverts par les autres ardoises) : mise à la corbeille normale.
       }
       const msg = t("act.trashSaleConfirm");
-      if(!confirm(msg)) return;
+      if(!await ask(msg)) return;
       state.data.sales.forEach(s=>{ if((s.groupId||s.id)===gid) s.status = "trash"; });
       saveData();
       showToast(t("act.saleTrashed"),"error");
@@ -5860,9 +5926,9 @@ function bindActionHandlers(container, stats){
       saveData();
       showToast(t("act.saleRestored"));
     };
-    else if(action==="permDeleteSaleGroup") el.onclick=()=>{
+    else if(action==="permDeleteSaleGroup") el.onclick=async ()=>{
       if(sellerRO()){ showToast(t("sel.notAllowed"), "error"); return; }
-      if(!confirm(t("act.permDeleteSaleConfirm"))) return;
+      if(!await ask(t("act.permDeleteSaleConfirm"))) return;
       const gid = el.dataset.id;
       const group = getSaleGroups().find(g=>g.id===gid);
       if(group){
@@ -5886,9 +5952,9 @@ function bindActionHandlers(container, stats){
       const ex = state.data.expenses.find(x=>x.id===el.dataset.id);
       if(ex) openAddExpenseModal(ex);
     };
-    else if(action==="deleteExpense") el.onclick=()=>{
-      const msg = "Cette dépense a-t-elle vraiment eu lieu ? Si oui, utilise plutôt 🗄️ Archiver — la corbeille retire cette dépense de tes totaux, comme si elle n'avait jamais existé.\n\nMettre quand même cette dépense à la corbeille ?";
-      if(!confirm(msg)) return;
+    else if(action==="deleteExpense") el.onclick=async ()=>{
+      const msg = t("act.trashExpenseConfirm");
+      if(!await ask(msg)) return;
       const ex = state.data.expenses.find(x=>x.id===el.dataset.id);
       if(ex) ex.status = "trash";
       saveData();
@@ -5912,9 +5978,9 @@ function bindActionHandlers(container, stats){
       saveData();
       showToast(t("exp.toastRestored"));
     };
-    else if(action==="permDeleteExpense") el.onclick=()=>{
+    else if(action==="permDeleteExpense") el.onclick=async ()=>{
       if(sellerRO()){ showToast(t("sel.notAllowed"), "error"); return; }
-      if(!confirm(t("act.permDeleteExpenseConfirm"))) return;
+      if(!await ask(t("act.permDeleteExpenseConfirm"))) return;
       const ex = state.data.expenses.find(x=>x.id===el.dataset.id);
       if(ex){
         state.data.deletedLog.push({type:"depense", id:ex.id, label:(((ex.label&&ex.label.trim())?ex.label:(ex.category||t("exp.defaultLabel")))+" — "+fmt(ex.amount)), deletedAt:todayFR()});
@@ -5959,8 +6025,8 @@ function bindActionHandlers(container, stats){
       render();
       showToast(t("set.pinSaved"));
     };
-    else if(action==="removePin") el.onclick=()=>{
-      if(!confirm(t("act.disablePinConfirm"))) return;
+    else if(action==="removePin") el.onclick=async ()=>{
+      if(!await ask(t("act.disablePinConfirm"))) return;
       settings.pin = null; settings.pinHash = null;
       settings.pinFailCount = 0; settings.pinLockedUntil = 0;
       saveSettings(settings);
@@ -6020,9 +6086,9 @@ function bindActionHandlers(container, stats){
       catUI.editing = null; render();
       showToast(t("cat.renamed"));
     };
-    else if(action==="deleteCategoryBtn") el.onclick=()=>{
+    else if(action==="deleteCategoryBtn") el.onclick=async ()=>{
       const name = el.dataset.cat;
-      if(!confirm('Supprimer la catégorie "'+name+'" ?')) return;
+      if(!await ask(t("cat.deleteConfirm").replace("{name}", name))) return;
       const res = deleteCategory(name);
       if(res.affected>0) showMessage(res.affected+" "+t("cat.affectedProductsA"));
       render();
@@ -6053,9 +6119,9 @@ function bindActionHandlers(container, stats){
       expCatUI.editing = null; render();
       showToast(t("cat.renamed"));
     };
-    else if(action==="deleteExpCategoryBtn") el.onclick=()=>{
+    else if(action==="deleteExpCategoryBtn") el.onclick=async ()=>{
       const name = el.dataset.cat;
-      if(!confirm('Supprimer la catégorie "'+name+'" ?')) return;
+      if(!await ask(t("cat.deleteConfirm").replace("{name}", name))) return;
       const res = deleteExpenseCategory(name);
       if(res.affected>0) showMessage(res.affected+" "+t("cat.affectedExpensesA"));
       render();
@@ -6113,7 +6179,7 @@ function attachContentHandlers(stats){
     const file = e.target.files[0];
     if(!file) return;
     const reader = new FileReader();
-    reader.onload = (ev)=>{
+    reader.onload = async (ev)=>{
       let payload;
       try{
         payload = JSON.parse(ev.target.result);
@@ -6128,7 +6194,7 @@ function attachContentHandlers(stats){
         importFile.value = "";
         return;
       }
-      if(!confirm(t("act.restoreBackupConfirm"))){
+      if(!await ask(t("act.restoreBackupConfirm"))){
         importFile.value = "";
         return;
       }
@@ -8670,7 +8736,7 @@ function buildDeletedLogHtml(){
   const rows = log.map(l=>`
     <div style="border-top:1px solid var(--border);padding:8px 0;font-size:12px;">
       <div>${icon(l.type)} ${esc(l.label)}</div>
-      <div style="color:var(--sub);font-size:10px;">Supprimé le ${l.deletedAt}</div>
+      <div style="color:var(--sub);font-size:10px;">${t("act.deletedOn")} ${l.deletedAt}</div>
     </div>`).join("");
   return `<div class="card">${toggleRow}<div style="margin-top:6px;">${rows}</div></div>`;
 }
@@ -8865,7 +8931,7 @@ function renderSettings(){
    avec les deux langues. Exigé par le Play Store (confidentialité surtout).
 ════════════════════════════════════════════════ */
 const LEGAL_CONTACT_EMAIL = "Bambasow.officiel@gmail.com";
-const LEGAL_UPDATED = "26/07/2026";
+const LEGAL_UPDATED = "04/08/2026";
 const LEGAL_PRIVACY_URL = "https://sites.google.com/view/registrepro/accueil";
 
 function openLegalModal(key){
@@ -8893,7 +8959,13 @@ function openLegalModal(key){
       <p>RegistrePro est destiné aux commerçants et aux personnes exerçant une activité professionnelle. L'application n'est pas conçue pour les enfants.</p>
       <div style="font-weight:bold;color:var(--goldL);margin:16px 0 5px;font-size:14px;">7. Les modifications de cette politique</div>
       <p>Nous pouvons faire évoluer cette politique. En cas de changement important, la nouvelle version sera publiée dans l'application, avec sa date.</p>
-      <div style="font-weight:bold;color:var(--goldL);margin:16px 0 5px;font-size:14px;">8. Nous contacter</div>
+      <div style="font-weight:bold;color:var(--goldL);margin:16px 0 5px;font-size:14px;">8. Supprimer votre compte et vos données</div>
+      <p>Pour supprimer votre compte RegistrePro et toutes les données associées :</p>
+      <p>1. Ouvrez l'application et connectez-vous<br>2. Touchez votre profil, puis « Mon compte »<br>3. Descendez jusqu'à « Supprimer mon compte »<br>4. Confirmez en saisissant le mot demandé</p>
+      <p>Ce qui est supprimé définitivement : votre compte, les informations de votre commerce, vos produits, votre stock, vos ventes, vos achats, vos dépenses, vos clients et leurs crédits, vos paiements et vos commandes. Les comptes vendeurs rattachés à votre commerce sont supprimés en même temps.</p>
+      <p>Ce qui est conservé : un enregistrement technique minimal attestant de la suppression, sans aucune donnée commerciale. Il empêche la réapparition de données déjà supprimées.</p>
+      <p>Délai : la suppression est immédiate et irréversible.</p>
+      <div style="font-weight:bold;color:var(--goldL);margin:16px 0 5px;font-size:14px;">9. Nous contacter</div>
       <p>Pour toute question, écrivez-nous à : ${mail}</p>
       <p style="color:var(--sub);font-size:11px;margin-top:14px;">Dernière mise à jour : ${LEGAL_UPDATED}</p>
     ` : `
@@ -8914,7 +8986,13 @@ function openLegalModal(key){
       <p>RegistrePro is intended for shopkeepers and people carrying out a professional activity. The application is not designed for children.</p>
       <div style="font-weight:bold;color:var(--goldL);margin:16px 0 5px;font-size:14px;">7. Changes to this policy</div>
       <p>We may update this policy from time to time. In the event of a significant change, the new version will be published in the application, with its date.</p>
-      <div style="font-weight:bold;color:var(--goldL);margin:16px 0 5px;font-size:14px;">8. Contact us</div>
+      <div style="font-weight:bold;color:var(--goldL);margin:16px 0 5px;font-size:14px;">8. Deleting your account and your data</div>
+      <p>To delete your RegistrePro account and all associated data:</p>
+      <p>1. Open the application and sign in<br>2. Tap your profile, then “My account”<br>3. Scroll down to “Delete my account”<br>4. Confirm by typing the requested word</p>
+      <p>What is permanently deleted: your account, your business information, your products, your stock, your sales, your purchases, your expenses, your customers and their credit, your payments and your orders. Seller accounts linked to your business are deleted at the same time.</p>
+      <p>What is retained: a minimal technical record attesting to the deletion, containing no business data. It prevents already deleted data from reappearing.</p>
+      <p>Timing: deletion is immediate and irreversible.</p>
+      <div style="font-weight:bold;color:var(--goldL);margin:16px 0 5px;font-size:14px;">9. Contact us</div>
       <p>For any question, write to us at: ${mail}</p>
       <p style="color:var(--sub);font-size:11px;margin-top:14px;">Last updated: ${LEGAL_UPDATED}</p>
     `;
@@ -9808,7 +9886,11 @@ try{ window.addEventListener("online", function(){ if(typeof syncFull==="functio
     // Le message est la couche la plus haute : le retour le ferme en premier,
     // sinon il fermerait le formulaire ouvert en dessous.
     const msg = document.getElementById("msgRoot");
-    if(msg && msg.innerHTML.trim()){ return closeMessage; }
+    if(msg && msg.innerHTML.trim()){
+      // Si c'est une QUESTION, le retour doit répondre « non » et libérer le
+      // verrou — sinon plus aucune question ne pourrait s'ouvrir ensuite.
+      return document.getElementById("askYesBtn") ? closeAsk : closeMessage;
+    }
     const ov = document.getElementById("accountPageRoot");
     if(ov && ov.style.display !== "none" && ov.innerHTML.trim()){ return closeAccountPage; }
     const picker = document.getElementById("pickerRoot");
